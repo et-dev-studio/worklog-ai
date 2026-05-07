@@ -11,6 +11,23 @@ from db.models import Event, EventType, Summary, Workstream
 from services.grouping_service import GroupingService
 
 
+def _voided_target_ids(session) -> set[str]:
+    import json as _json
+
+    rows = session.scalars(select(Event.metadata_json).where(Event.type == EventType.VOIDED))
+    out: set[str] = set()
+    for raw in rows:
+        if not raw:
+            continue
+        try:
+            parsed = _json.loads(raw)
+            if isinstance(parsed, dict) and parsed.get("event_id"):
+                out.add(parsed["event_id"])
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 class SummaryService:
     def __init__(self, session: Session):
         self.session = session
@@ -19,11 +36,16 @@ class SummaryService:
     def daily_events(self, day: date) -> list[Event]:
         start = datetime(day.year, day.month, day.day, tzinfo=UTC)
         end = start + timedelta(days=1)
-        return list(
+        events = list(
             self.session.scalars(
-                select(Event).where(Event.timestamp >= start).where(Event.timestamp < end)
+                select(Event)
+                .where(Event.timestamp >= start)
+                .where(Event.timestamp < end)
+                .where(Event.type != EventType.VOIDED)
             )
         )
+        voided = _voided_target_ids(self.session)
+        return [e for e in events if e.id not in voided]
 
     def grouped_context(self, day: date) -> str:
         events = self.daily_events(day)
