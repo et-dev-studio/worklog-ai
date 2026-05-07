@@ -1,43 +1,89 @@
 # worklog-ai
 
-Local-first engineering work memory system. Capture work events as you go, run AI-driven reflection on unresolved items, and generate human-reviewed daily standup summaries — all from the terminal, all on your own machine.
+Local-first engineering work memory. Capture work events from the terminal, run AI-driven reflection on unresolved items, generate human-reviewed daily standup summaries, and search the whole log with FTS — all on your machine, all from the shell.
+
+## Install
+
+```bash
+pip install -e .[dev]            # editable install; exposes `wl` and `worklog`
+wl init-db                       # runs Alembic upgrade head
+wl --install-completion bash     # bash | zsh | fish | powershell
+```
 
 ## Quick start
 
 ```bash
-pip install -r requirements.txt
-python -m cli.main init-db
-python -m cli.main workstream create "AUTH-1421 OAuth redirect fixes"
-python -m cli.main resume <WORKSTREAM_ID>
-python -m cli.main add "Investigating Redis timeout"
-python -m cli.main reflect
-python -m cli.main summary
-python -m cli.main status
-python -m cli.main daemon-start
+wl workstream create "AUTH-1421 OAuth redirect fixes"
+wl resume <WORKSTREAM_ID>
+wl add "Investigating Redis timeout" --tag bug
+wl event search redis
+wl reflect
+wl summary --day today
+wl daemon-start
+wl daemon-dashboard --watch 5
 ```
 
-## CLI commands
+`wl` and `python -m cli.main` are equivalent. `wl a` is a hidden alias of `wl add`.
 
-- `init-db` — initialize the SQLite schema by running Alembic migrations to head
-- `add <text> [--workstream-id ID] [--yes/-y]` — capture an event; prompts for workstream attach unless `--yes`/non-TTY
-- `connect [--event-id ID] [--workstream-id ID] [--yes/-y]` — link an event to a workstream and emit an audit event; in non-interactive mode both ids must be passed explicitly
-- `reflect` — run an interactive reflection session over the top unresolved capture events (TTY required)
-- `summary [--day YYYY-MM-DD] [--export-format markdown|json|terminal|all] [--yes/-y]` — generate, review, edit, and export the daily summary; defaults to today
-- `resume <WORKSTREAM_ID>` — set the active workstream context for future captures (id is validated)
-- `status` — show active workstreams and pending reflections
-- `daemon-start | daemon-stop | daemon-restart | daemon-status` — manage the background scheduler daemon
-- `notify-test [MESSAGE]` — fire a notification through the same path used by reminders, useful for verifying delivery
-- `workstream create <TITLE> [--summary TEXT]` — create a workstream (titles are immutable after creation)
-- `workstream list` — list all workstreams
-- `workstream set-status <WORKSTREAM_ID> <active|paused|completed|archived>` — change status, emits a `STATUS_UPDATE` audit event
+## CLI surface
 
-### Non-interactive use
+### Capture and review
+
+- `wl add <text|-> [--workstream-id ID] [--tag T ...] [--yes/-y] [--quiet/-q]` — capture an event. `-` reads from stdin. `--quiet`/`--yes` skips prompts; in non-TTY shells the active workstream pointer is used. `--tag` may be passed multiple times.
+- `wl undo [EVENT_ID] [--reason TEXT]` — append a `VOIDED` audit event referencing the original (defaults to the most recent capture). Voided events are filtered from `event list` / `event search` / `summary` by default; pass `--type capture --type voided` to see both.
+- `wl resume <WORKSTREAM_ID>` — set the active workstream pointer (id is validated).
+- `wl status [--json]` — active workstreams + pending reflection count.
+
+### Browse the log
+
+- `wl event list [--day today|yesterday|-3d|this-week|last-week|YYYY-MM-DD] [--ws ID] [--tag NAME] [--type T ...] [--limit N] [--json]`
+- `wl event show <ID> [--json]` — single event with attached tags and metadata.
+- `wl event search <QUERY> [--limit N] [--json]` — FTS5 search across event content.
+- `wl event tag <ID> <TAG> [TAG ...]` — attach one or more tags.
+
+### Tags
+
+- `wl tag list [--json]` — every tag with its event count.
+- `wl tag show <NAME> [--json]` — events carrying the tag.
+
+### Workstreams
+
+- `wl workstream create <TITLE> [--summary TEXT]` — create (titles are immutable after creation).
+- `wl workstream list [--json]`
+- `wl workstream set-status <WORKSTREAM_ID> <active|paused|completed|archived>` — emits a `STATUS_UPDATE` audit event.
+
+### Reflection / summary / connect
+
+- `wl reflect` — interactive Q&A over top unresolved capture events. TTY required (exit 2 otherwise). Healthcheck runs first; missing `BITNET_CMD` → exit 3.
+- `wl summary [--day SPEC] [--export-format markdown|json|terminal|all] [--yes/-y]` — generate, review, edit, export.
+- `wl connect [--event-id ID] [--workstream-id ID] [--yes/-y]` — link an event to a workstream + emit `event_connected` audit event. Non-interactive mode requires both ids.
+
+### Daemon
+
+- `wl daemon-start | daemon-stop | daemon-restart | daemon-status [--json]`
+- `wl daemon-dashboard [--watch N] [--json]` — schedules with next-run timestamps, pending reflections, last 10 events.
+- `wl notify-test [MESSAGE]` — verify the notification path.
+
+### Diagnostics
+
+- `wl doctor [--json]` — DB path, Alembic head, BITNET healthcheck, daemon status + last-job age, notify-send availability, prompts dir, missing prompts, active workstream, completion install hint.
+
+## JSON output
+
+Read commands accept `--json` for machine-readable output: `status`, `workstream list`, `event list/show/search`, `tag list/show`, `daemon-status`, `daemon-dashboard`, `doctor`. Output is JSON (objects or arrays) on stdout — nothing else — so it pipes cleanly into `jq`.
+
+## Non-interactive use
 
 `add`, `connect`, and `summary` accept `--yes`/`-y` and detect non-TTY stdin so they exit cleanly when run from cron, pipes, or CI. `reflect` requires a TTY by design and exits with code 2 otherwise.
 
+```bash
+echo "ad-hoc note" | wl add - --quiet
+wl summary --yes --day yesterday > /tmp/standup.md
+```
+
 ## Config
 
-Scheduler reminder times are configurable in `config/config.toml`. Example:
+Scheduler reminder times in `config/config.toml`:
 
 ```toml
 [lunch]
@@ -47,7 +93,7 @@ time = "13:00"
 time = "18:00"
 ```
 
-The daemon supervises these jobs and exposes job-health-aware status: `daemon-status` reports `degraded` if either the heartbeat is stale or no scheduled job has run within `2× max(interval)`.
+The daemon supervises these jobs. `daemon-status` reports `degraded` when either the heartbeat is stale or no scheduled job has run within `2× max(interval)`.
 
 ### Notifications
 
@@ -60,7 +106,7 @@ Reminders are dispatched via `notify-send`. When the binary isn't available (e.g
 
 ## Storage layout
 
-By default, all runtime data lives in `<repo_root>/data/`. Set `WORKLOG_HOME` to relocate everything (database, exports, daemon state, notification log, active-workstream pointer):
+By default, all runtime data lives under `<repo_root>/data/`. Set `WORKLOG_HOME` to relocate everything (database, exports, daemon state, notifications log, active-workstream pointer):
 
 ```bash
 export WORKLOG_HOME="$HOME/.local/share/worklog-ai"
@@ -70,7 +116,7 @@ Code-bundled assets (`prompts/`, `alembic/`, `config/`) stay anchored to the rep
 
 ## Inference
 
-Worklog drives reflection and summarization through a local inference binary. Set `BITNET_CMD` to point at it:
+Worklog drives reflection and summarization through a local inference binary. Set `BITNET_CMD`:
 
 ```bash
 export BITNET_CMD="/path/to/bitnet_infer"
@@ -84,7 +130,7 @@ If `BITNET_CMD` is unset or the healthcheck fails, `reflect` and `summary` exit 
 
 ```bash
 source ~/BitNet/BitEnv/bin/activate   # project venv
-pip install -r requirements.txt
+pip install -e .[dev]
 pytest -q                              # all tests
 alembic upgrade head                   # apply migrations against the configured DB
 alembic revision --autogenerate -m "description"
@@ -92,7 +138,7 @@ alembic revision --autogenerate -m "description"
 
 ### Pre-commit hook
 
-A pytest-driven pre-commit hook lives at `scripts/pre-commit.sh`. To install it:
+A pytest-driven pre-commit hook lives at `scripts/pre-commit.sh`. To install:
 
 ```bash
 ln -sf "$(pwd)/scripts/pre-commit.sh" .git/hooks/pre-commit

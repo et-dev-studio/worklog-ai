@@ -1,5 +1,35 @@
 # Changelog
 
+## Phase 3 — Terminal-First UX (PR #4)
+
+### Added
+- **`wl` / `worklog` entry points** via `pyproject.toml` (`pip install -e .` exposes both). `python -m cli.main` still works.
+- **Hidden alias `wl a`** for `wl add`.
+- **`add` ergonomics**: `--quiet`/`-q` short flag, `add -` reads from stdin, repeated `--tag`/`-t TAG` attaches tags inline.
+- **`wl undo [EVENT_ID] [--reason TEXT]`** writes a `VOIDED` audit event referencing the original (defaults to most recent capture). All read paths skip voided events by default.
+- **Event surface**:
+  - `wl event list` — `--day` (`today | yesterday | -Nd | this-week | last-week | YYYY-MM-DD`), `--ws`, `--tag`, `--type`, `--limit`.
+  - `wl event show <ID>` — event with tags + metadata.
+  - `wl event search <QUERY>` — FTS5 search over `events.content` via the new `events_fts` virtual table mirrored by triggers.
+  - `wl event tag <ID> <TAG>...` — attach tags.
+- **Tag surface**: `wl tag list`, `wl tag show <NAME>`.
+- **`wl doctor`** — DB path, Alembic head, BITNET healthcheck, daemon status + last-job age, notify-send availability, prompts dir + missing files, active workstream, completion hint.
+- **`wl daemon-dashboard [--watch N]`** — schedules with next-run timestamps, pending reflections, last 10 events.
+- **Global `--json` flag** on every read command (`status`, `workstream list`, `event list/show/search`, `tag list/show`, `daemon-status`, `daemon-dashboard`, `doctor`). Output is pure JSON on stdout for `jq` pipelines.
+- **Natural-date parser** `services/dateparse_service.py` consumed by `event list --day` and `summary --day`.
+
+### Schema
+- `0003_voided_event_type` widens the `events.type` CHECK to include `VOIDED` (`batch_alter_table` recreates the events table — must run before triggers are installed).
+- `0004_tags` — `tags`, `event_tags` join table, indexes on both sides.
+- `0005_events_fts` — FTS5 virtual table mirroring `events.content`, plus AFTER INSERT/DELETE/UPDATE triggers on `events`. Backfilled from existing rows. **Must run after `0003_voided_event_type`** so the trigger set survives the events-table recreation.
+
+### Tests
+- `tests/test_phase3_ux.py` (9 cases) covers `--json` output for status/workstream/list/show/search/tag/doctor/dashboard, FTS search semantics, undo + voided filtering, stdin capture, dateparse helpers.
+
+### Docs
+- README rewritten around the `wl` surface, JSON mode, undo, doctor, dashboard, and natural-date filters.
+- `CLAUDE.md` architecture map refreshed to cover the new layers (paths_service, tag_service, dateparse_service, output helper, prompts helper) and the migration-order constraint between enum widening and FTS triggers.
+
 ## Phase 2 — v1 Checklist Closure & Test Coverage (PR #3)
 
 ### Tests
