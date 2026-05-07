@@ -25,6 +25,7 @@ class EventType(str, Enum):
     EVENT_CONNECTED = "event_connected"
     STATUS_UPDATE = "status_update"
     SUMMARY_GENERATED = "summary_generated"
+    VOIDED = "voided"
 
 
 class Workstream(Base):
@@ -70,6 +71,21 @@ class Reflection(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     event: Mapped[Event] = relationship(back_populates="reflections")
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class EventTag(Base):
+    __tablename__ = "event_tags"
+
+    event_id: Mapped[str] = mapped_column(ForeignKey("events.id"), primary_key=True)
+    tag_id: Mapped[str] = mapped_column(ForeignKey("tags.id"), primary_key=True)
 
 
 class Summary(Base):

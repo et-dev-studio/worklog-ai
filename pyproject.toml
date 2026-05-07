@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worklog-ai"
+version = "1.0.0"
+description = "Local-first event-sourced work memory CLI for engineers."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "et-dev-studio" }]
+license = { text = "MIT" }
+dependencies = [
+    "typer>=0.12",
+    "sqlalchemy>=2.0",
+    "apscheduler>=3.10",
+    "questionary>=2.0",
+    "alembic>=1.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+wl = "cli.main:app"
+worklog = "cli.main:app"
+
+[tool.setuptools]
+packages = ["agents", "cli", "db", "services"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = ["prompts/*.txt", "config/*.toml", "alembic/*.ini", "alembic/versions/*.py"]

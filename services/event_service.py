@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from db.models import Event, EventType, Workstream, WorkstreamStatus
+from db.models import Event, EventTag, EventType, Tag, Workstream, WorkstreamStatus
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -85,7 +85,103 @@ class EventService:
         return ranked[:limit]
 
     def list_recent(self, limit: int = 20) -> list[Event]:
-        return list(self.session.scalars(select(Event).order_by(Event.timestamp.desc()).limit(limit)))
+        events = list(
+            self.session.scalars(
+                select(Event).order_by(Event.timestamp.desc()).limit(limit * 2)
+            )
+        )
+        voided = self.voided_target_ids()
+        return [e for e in events if e.id not in voided][:limit]
+
+    def voided_target_ids(self) -> set[str]:
+        rows = self.session.scalars(
+            select(Event.metadata_json).where(Event.type == EventType.VOIDED)
+        )
+        targets: set[str] = set()
+        for raw in rows:
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and parsed.get("event_id"):
+                    targets.add(parsed["event_id"])
+            except (TypeError, ValueError):
+                continue
+        return targets
+
+    def list_events(
+        self,
+        day_range: tuple[date, date] | None = None,
+        workstream_id: str | None = None,
+        tag: str | None = None,
+        types: list[EventType] | None = None,
+        include_voided: bool = False,
+        limit: int = 50,
+    ) -> list[Event]:
+        stmt = select(Event)
+        if day_range is not None:
+            start = datetime(day_range[0].year, day_range[0].month, day_range[0].day, tzinfo=UTC)
+            end = datetime(day_range[1].year, day_range[1].month, day_range[1].day, tzinfo=UTC) + timedelta(days=1)
+            stmt = stmt.where(Event.timestamp >= start).where(Event.timestamp < end)
+        if workstream_id:
+            stmt = stmt.where(Event.workstream_id == workstream_id)
+        if types:
+            stmt = stmt.where(Event.type.in_(types))
+        else:
+            stmt = stmt.where(Event.type == EventType.CAPTURE)
+        if tag:
+            stmt = stmt.join(EventTag, EventTag.event_id == Event.id).join(
+                Tag, Tag.id == EventTag.tag_id
+            ).where(Tag.name == tag)
+        events = list(self.session.scalars(stmt.order_by(Event.timestamp.desc()).limit(limit)))
+        if include_voided:
+            return events
+        voided = self.voided_target_ids()
+        return [e for e in events if e.id not in voided]
+
+    def get_event(self, event_id: str) -> Event | None:
+        return self.session.get(Event, event_id)
+
+    def search(self, query: str, limit: int = 25, include_voided: bool = False) -> list[Event]:
+        rows = self.session.execute(
+            text(
+                "SELECT event_id FROM events_fts WHERE events_fts MATCH :q "
+                "ORDER BY rank LIMIT :lim"
+            ),
+            {"q": query, "lim": limit},
+        ).fetchall()
+        ids = [r[0] for r in rows]
+        if not ids:
+            return []
+        events = list(self.session.scalars(select(Event).where(Event.id.in_(ids))))
+        ordered = {e.id: e for e in events}
+        result = [ordered[i] for i in ids if i in ordered]
+        if include_voided:
+            return result
+        voided = self.voided_target_ids()
+        return [e for e in result if e.id not in voided]
+
+    def void_event(self, event_id: str, reason: str | None = None) -> Event | None:
+        event = self.session.get(Event, event_id)
+        if not event:
+            return None
+        if event.type != EventType.CAPTURE:
+            raise ValueError("Only CAPTURE events can be voided.")
+        existing = self.voided_target_ids()
+        if event_id in existing:
+            return event
+        self.session.add(
+            Event(
+                id=str(uuid4()),
+                timestamp=datetime.now(UTC),
+                type=EventType.VOIDED,
+                content=f"Voided event {event_id}" + (f": {reason}" if reason else ""),
+                workstream_id=event.workstream_id,
+                metadata_json=json.dumps({"event_id": event_id, "reason": reason}),
+            )
+        )
+        self.session.commit()
+        return event
 
     def connect_event(self, event_id: str, workstream_id: str) -> Event | None:
         event = self.session.get(Event, event_id)
