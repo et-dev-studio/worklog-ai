@@ -49,7 +49,7 @@ def prompts_dir() -> Path:
     env = os.getenv("WORKLOG_PROMPTS")
     if env:
         return Path(env).expanduser().resolve()
-    return home() / "prompts"
+    return project_root() / "prompts"
 
 
 def daemon_pid_path() -> Path:
