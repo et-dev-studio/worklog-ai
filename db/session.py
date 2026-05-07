@@ -1,9 +1,9 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-DATABASE_URL = "sqlite:///data/worklog.db"
+from services.paths_service import db_url
 
-engine = create_engine(DATABASE_URL, future=True)
+engine = create_engine(db_url(), future=True)
 SessionLocal = sessionmaker(bind=engine, class_=Session, autoflush=False, autocommit=False)
 
 

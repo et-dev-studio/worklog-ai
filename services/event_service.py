@@ -7,7 +7,11 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from db.models import Event, EventType, Workstream
+from db.models import Event, EventType, Workstream, WorkstreamStatus
+
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 class EventService:
@@ -39,7 +43,7 @@ class EventService:
         keyword_overlap = len(words.intersection(title_words)) * 3.0
         exact_technical_terms = len(technical_terms.intersection(title_words)) * 4.0
 
-        recency_days = max((now - ws.last_activity_at).days, 0)
+        recency_days = max((now - _as_utc(ws.last_activity_at)).days, 0)
         recent_activity = max(0.0, 14 - recency_days)
 
         prior_attach_count = self.session.scalar(select(func.count()).select_from(Event).where(Event.workstream_id == ws.id)) or 0
@@ -60,13 +64,19 @@ class EventService:
         for e in recent_ws_events:
             e_words = {w.lower() for w in e.content.split() if len(w) > 2}
             semantic_similarity += len(words.intersection(e_words)) * 0.7
-            hours = max((now - e.timestamp).total_seconds() / 3600, 0)
+            hours = max((now - _as_utc(e.timestamp)).total_seconds() / 3600, 0)
             temporal_proximity += max(0.0, 72 - hours) / 72
 
         return keyword_overlap + exact_technical_terms + recent_activity + prior_attachments + semantic_similarity + temporal_proximity
 
     def suggest_workstreams(self, content: str, limit: int = 3) -> list[Workstream]:
-        candidates = list(self.session.scalars(select(Workstream).where(Workstream.status.in_(["active", "paused"]))))
+        candidates = list(
+            self.session.scalars(
+                select(Workstream).where(
+                    Workstream.status.in_([WorkstreamStatus.ACTIVE, WorkstreamStatus.PAUSED])
+                )
+            )
+        )
         words = {w.lower() for w in content.split() if len(w) > 2}
         technical_terms = {w for w in words if any(ch.isdigit() for ch in w) or "-" in w}
         now = datetime.now(UTC)

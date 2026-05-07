@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -75,7 +76,7 @@ class ReflectionService:
                 type=EventType.REFLECTION,
                 content=f"Reflection added for event {event_id}",
                 workstream_id=None,
-                metadata_json=f'{{"event_id":"{event_id}"}}',
+                metadata_json=json.dumps({"event_id": event_id}),
             )
         )
         self.session.commit()

@@ -1,12 +1,21 @@
+import sys
 from logging.config import fileConfig
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from db.models import Base
+from services.paths_service import db_url
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", db_url())
 
 target_metadata = Base.metadata
 
