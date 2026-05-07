@@ -80,6 +80,20 @@ def test_matching_prefers_related_workstream() -> None:
     assert suggestions[0].id == ws1.id
 
 
+def test_suggestions_match_real_db_enum_storage() -> None:
+    session = make_session()
+    active_ws = WorkstreamService(session).create("PLATFORM-1 redis pool")
+    paused_ws = WorkstreamService(session).create("AUTH-1 oauth")
+    WorkstreamService(session).set_status(paused_ws.id, WorkstreamStatus.PAUSED)
+    archived_ws = WorkstreamService(session).create("LEGACY-1 retired")
+    WorkstreamService(session).set_status(archived_ws.id, WorkstreamStatus.ARCHIVED)
+    suggestions = EventService(session).suggest_workstreams("redis pool", limit=5)
+    suggestion_ids = {ws.id for ws in suggestions}
+    assert active_ws.id in suggestion_ids
+    assert paused_ws.id in suggestion_ids
+    assert archived_ws.id not in suggestion_ids
+
+
 def test_human_governance_title_rename_guardrail() -> None:
     session = make_session()
     ws = WorkstreamService(session).create("AUTH-9 immutable title")

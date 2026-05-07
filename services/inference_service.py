@@ -5,6 +5,10 @@ import os
 from dataclasses import dataclass
 
 
+class InferenceUnavailable(RuntimeError):
+    pass
+
+
 @dataclass
 class InferenceHealth:
     configured: bool
@@ -23,7 +27,11 @@ class InferenceService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return InferenceHealth(configured=True, runnable=False, detail="healthcheck timed out")
         if proc.returncode != 0:
             return InferenceHealth(configured=True, runnable=False, detail=stderr.decode("utf-8", errors="ignore")[:200])
         return InferenceHealth(configured=True, runnable=True, detail="ok")
@@ -31,8 +39,9 @@ class InferenceService:
     async def generate(self, prompt: str, temperature: float = 0.3) -> str:
         cmd = os.getenv("BITNET_CMD")
         if not cmd:
-            await asyncio.sleep(0)
-            return f"- Placeholder response for: {prompt[:80]}"
+            raise InferenceUnavailable(
+                "BITNET_CMD not set. Configure the local inference binary or run `wl doctor` for setup."
+            )
 
         last_error = ""
         for _ in range(2):
@@ -42,8 +51,13 @@ class InferenceService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), timeout=30)
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), timeout=30)
+            except asyncio.TimeoutError:
+                proc.kill()
+                last_error = "inference timed out after 30s"
+                continue
             if proc.returncode == 0:
                 return stdout.decode("utf-8", errors="ignore").strip()
             last_error = stderr.decode("utf-8", errors="ignore")
-        raise RuntimeError(last_error or "BitNet subprocess failed")
+        raise InferenceUnavailable(last_error or "BITNET subprocess failed")

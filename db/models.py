@@ -83,6 +83,7 @@ class Summary(Base):
 
 @event.listens_for(Workstream.title, "set", retval=True)
 def prevent_title_mutation(target, value, oldvalue, initiator):
-    if oldvalue is not None and oldvalue != value:
+    from sqlalchemy.orm.attributes import NEVER_SET, NO_VALUE
+    if oldvalue not in (None, NEVER_SET, NO_VALUE) and oldvalue != value:
         raise PermissionError("Workstream titles are immutable after creation.")
     return value

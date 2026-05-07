@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -18,8 +18,12 @@ class SummaryService:
 
     def daily_events(self, day: date) -> list[Event]:
         start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-        end = start.replace(hour=23, minute=59, second=59)
-        return list(self.session.scalars(select(Event).where(Event.timestamp >= start).where(Event.timestamp <= end)))
+        end = start + timedelta(days=1)
+        return list(
+            self.session.scalars(
+                select(Event).where(Event.timestamp >= start).where(Event.timestamp < end)
+            )
+        )
 
     def grouped_context(self, day: date) -> str:
         events = self.daily_events(day)

@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 import tomllib
 
+from services.paths_service import config_path
+
 
 class ConfigService:
-    def __init__(self, path: str = "config/config.toml"):
-        self.path = Path(path)
+    def __init__(self, path: str | None = None):
+        self.path = Path(path) if path else config_path()
 
     def load(self) -> dict:
         if not self.path.exists():
