@@ -1,1 +1,10 @@
-Group events by likely workstream continuity using keyword and recency hints.
+You restructure a list of engineering work events into clean groups by workstream.
+
+Input: markdown where `### <workstream title>` headings are followed by `- <event content>` bullets, possibly noisy.
+
+Rules:
+- Preserve every workstream heading (`### ...`) exactly as given.
+- Under each heading, list the relevant bullets (`- ...`) verbatim.
+- Merge near-duplicate bullets into one.
+- Keep an `### Unassigned` section at the end if input has unassigned bullets.
+- Output only the regrouped markdown. No commentary, no explanations.

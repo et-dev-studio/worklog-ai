@@ -1,5 +1,32 @@
 # Changelog
 
+## Phase 4 — HTTP/OpenAI-compatible inference (PR #6)
+
+### Architecture change (breaking)
+Worklog no longer spawns a subprocess per inference call. Agents speak the OpenAI Chat Completions API; a separate inference server (e.g. `llama-server`, ollama, vLLM, OpenAI) holds the model and applies its own chat template. Persistent model load → sub-second responses; backend swaps require zero code change.
+
+### Removed
+- `BITNET_CMD` env var and the subprocess code path. **No backwards compatibility — hard cut.**
+- `scripts/bitnet-shim.sh` (never shipped; obsoleted by the HTTP layer).
+
+### Added
+- `services/inference_service.py` rewritten as a stdlib HTTP client (`urllib.request` + `asyncio.to_thread`). New entry point: `chat(messages, temperature, max_tokens, **extra) -> str`.
+- Auto-detect model id via `GET /v1/models` on first call (cached).
+- New env vars: `WORKLOG_INFERENCE_URL`, `WORKLOG_INFERENCE_MODEL`, `WORKLOG_INFERENCE_API_KEY`, `WORKLOG_INFERENCE_TIMEOUT`.
+- `scripts/start-inference.sh` — wraps `llama-server` with env-driven defaults; intended to run in its own terminal, tmux pane, or as a systemd-user unit.
+- `docs/inference-systemd.md` — copy-paste systemd-user unit + ollama / vLLM swap example.
+- `tests/_fake_inference_server.py` — tiny stdlib `ThreadingHTTPServer` returning canned `/v1/models` and `/v1/chat/completions`. Used by `tests/test_e2e_workflow.py` instead of spawning a real binary; **fast** and deterministic.
+
+### Updated
+- `agents/reflection_agent.py`, `agents/summary_agent.py`: build `[{role:"system", …}, {role:"user", …}]` and call `inference.chat(...)`. Each prompt template is now interpreted as a system prompt.
+- `prompts/reflection.txt`, `prompts/grouping.txt`, `prompts/categorize.txt`, `prompts/summarize.txt`: rewritten as explicit system prompts with output format specs and example outputs (the previous one-liners were too underspecified for instruction-tuned models).
+- `wl doctor` shows: `Inference URL`, `Inference reachable`, `Inference model` (auto-detected), `Inference latency` (ms). `bitnet` block removed from JSON output (replaced with `inference`).
+- `cli/main.py reflect` / `summary` health-check the HTTP server before running.
+- `README.md`, `CLAUDE.md`: rewritten Inference section with backend-swap examples (ollama / OpenAI / Anthropic).
+
+### Deferred to v1.1
+- Streaming responses (SSE)
+
 ## Phase 3 — Terminal-First UX (PR #4)
 
 ### Added

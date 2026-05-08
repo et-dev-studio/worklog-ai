@@ -15,6 +15,7 @@ def _run(args: list[str], home: Path, stdin: str | None = None) -> subprocess.Co
     env = os.environ.copy()
     env["WORKLOG_HOME"] = str(home)
     env.pop("BITNET_CMD", None)
+    env.pop("WORKLOG_INFERENCE_URL", None)
     return subprocess.run(
         [sys.executable, "-m", "cli.main", *args],
         cwd=str(PROJECT_ROOT),
@@ -115,7 +116,8 @@ def test_doctor_json_reports_components(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["worklog_home"] == str(home.resolve())
     assert payload["alembic_revision"] == "0005_events_fts"
-    assert payload["bitnet"]["configured"] is False
+    assert payload["inference"]["reachable"] is False
+    assert payload["inference"]["url"]
     assert payload["missing_prompts"] == []
 
 
