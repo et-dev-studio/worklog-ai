@@ -18,6 +18,7 @@ def _run(args: list[str], home: Path, timeout: int = 15) -> subprocess.Completed
     env = os.environ.copy()
     env["WORKLOG_HOME"] = str(home)
     env.pop("BITNET_CMD", None)
+    env.pop("WORKLOG_INFERENCE_URL", None)
     return subprocess.run(
         [sys.executable, "-m", "cli.main", *args],
         cwd=str(PROJECT_ROOT),

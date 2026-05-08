@@ -54,7 +54,7 @@ wl daemon-dashboard --watch 5
 
 ### Reflection / summary / connect
 
-- `wl reflect` — interactive Q&A over top unresolved capture events. TTY required (exit 2 otherwise). Healthcheck runs first; missing `BITNET_CMD` → exit 3.
+- `wl reflect` — interactive Q&A over top unresolved capture events. TTY required (exit 2 otherwise). Healthcheck runs first; unreachable inference server → exit 3.
 - `wl summary [--day SPEC] [--export-format markdown|json|terminal|all] [--yes/-y]` — generate, review, edit, export.
 - `wl connect [--event-id ID] [--workstream-id ID] [--yes/-y]` — link an event to a workstream + emit `event_connected` audit event. Non-interactive mode requires both ids.
 
@@ -116,15 +116,43 @@ Code-bundled assets (`prompts/`, `alembic/`, `config/`) stay anchored to the rep
 
 ## Inference
 
-Worklog drives reflection and summarization through a local inference binary. Set `BITNET_CMD`:
+Worklog talks to an OpenAI-compatible Chat Completions HTTP server (`/v1/chat/completions` + `/v1/models`). The agents send structured `{role, content}` messages and let the server apply the model's chat template. Worklog is backend-agnostic — anything speaking the OpenAI API works: `llama-server` (recommended for BitNet), ollama, vLLM, OpenAI, or Anthropic via LiteLLM.
+
+### Local default — `llama-server` + BitNet
 
 ```bash
-export BITNET_CMD="/path/to/bitnet_infer"
+# In one terminal, leave it running:
+./scripts/start-inference.sh
+
+# In your shell rc:
+export WORKLOG_INFERENCE_URL="http://127.0.0.1:8080/v1"
 ```
 
-The binary must accept the prompt on stdin and emit the response on stdout. `BITNET_CMD --help` is used as a healthcheck.
+`scripts/start-inference.sh` wraps `llama-server` with sensible defaults; tune via env vars (`BITNET_DIR`, `BITNET_MODEL`, `INFERENCE_HOST`, `INFERENCE_PORT`, `INFERENCE_CTX`, `INFERENCE_THREADS`, `INFERENCE_API_KEY`). For a long-lived setup, register the script as a systemd-user unit — see [`docs/inference-systemd.md`](docs/inference-systemd.md).
 
-If `BITNET_CMD` is unset or the healthcheck fails, `reflect` and `summary` exit with code 3 and an actionable error; no placeholder text is ever persisted as a real summary.
+### Configuration
+
+| Variable | Purpose |
+|---|---|
+| `WORKLOG_INFERENCE_URL` | Base URL ending in `/v1`. Default `http://127.0.0.1:8080/v1`. |
+| `WORKLOG_INFERENCE_MODEL` | Model id to send. Auto-detected from `GET /v1/models` if unset. |
+| `WORKLOG_INFERENCE_API_KEY` | Optional bearer token, sent as `Authorization: Bearer ...`. |
+| `WORKLOG_INFERENCE_TIMEOUT` | Per-call timeout in seconds (default 120). |
+
+### Switching backends
+
+```bash
+# Ollama
+export WORKLOG_INFERENCE_URL="http://127.0.0.1:11434/v1"
+export WORKLOG_INFERENCE_MODEL="llama3.1"
+
+# OpenAI
+export WORKLOG_INFERENCE_URL="https://api.openai.com/v1"
+export WORKLOG_INFERENCE_MODEL="gpt-4o-mini"
+export WORKLOG_INFERENCE_API_KEY="sk-..."
+```
+
+If the server is unreachable, returns a non-2xx, or yields an empty completion, `reflect` and `summary` exit with code 3 and an actionable error. No placeholder text is ever persisted as a real summary.
 
 ## Development
 

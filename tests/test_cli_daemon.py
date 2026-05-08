@@ -18,6 +18,7 @@ def _env(home: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["WORKLOG_HOME"] = str(home)
     env.pop("BITNET_CMD", None)
+    env.pop("WORKLOG_INFERENCE_URL", None)
     return env
 
 

@@ -8,6 +8,12 @@ class ReflectionAgent:
         self.prompts = prompts
 
     async def generate_questions(self, event_text: str) -> str:
-        template = self.prompts.load("reflection.txt")
-        prompt = f"{template}\n\nEvent:\n{event_text}"
-        return await self.inference.generate(prompt)
+        system = self.prompts.load("reflection.txt")
+        return await self.inference.chat(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": event_text},
+            ],
+            temperature=0.4,
+            max_tokens=200,
+        )

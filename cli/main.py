@@ -185,10 +185,14 @@ def doctor(json_output: bool = typer.Option(False, "--json")) -> None:
         "database": str(db_path()),
         "database_exists": db_path().exists(),
         "alembic_revision": _alembic_head() if db_path().exists() else None,
-        "bitnet": {
-            "configured": health.configured,
-            "runnable": health.runnable,
+        "inference": {
+            "url": health.url or inference.url,
+            "reachable": health.runnable,
             "detail": health.detail,
+            "model": health.model,
+            "latency_ms": (
+                round(health.latency_ms, 1) if health.latency_ms is not None else None
+            ),
         },
         "daemon": {
             "status": daemon.status(),
@@ -216,8 +220,20 @@ def doctor(json_output: bool = typer.Option(False, "--json")) -> None:
     typer.echo(fmt("Database:", report["database"]))
     typer.echo(fmt("DB exists:", report["database_exists"]))
     typer.echo(fmt("Alembic revision:", report["alembic_revision"] or "(no DB)"))
-    typer.echo(fmt("BITNET configured:", report["bitnet"]["configured"]))
-    typer.echo(fmt("BITNET runnable:", f"{report['bitnet']['runnable']} ({report['bitnet']['detail']})"))
+    typer.echo(fmt("Inference URL:", report["inference"]["url"]))
+    typer.echo(
+        fmt(
+            "Inference reachable:",
+            f"{report['inference']['reachable']} ({report['inference']['detail']})",
+        )
+    )
+    typer.echo(fmt("Inference model:", report["inference"]["model"] or "(none detected)"))
+    typer.echo(
+        fmt(
+            "Inference latency:",
+            f"{report['inference']['latency_ms']} ms" if report["inference"]["latency_ms"] is not None else "(n/a)",
+        )
+    )
     typer.echo(fmt("Daemon status:", report["daemon"]["status"]))
     typer.echo(fmt("Daemon heartbeat age:", report["daemon"]["heartbeat_age_seconds"]))
     typer.echo(fmt("Daemon last-job age:", report["daemon"]["last_job_age_seconds"]))

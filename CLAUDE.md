@@ -53,7 +53,7 @@ wl daemon-dashboard --watch 5
 - `reflection_service.py`: Scores unresolved events by priority (short text, no workstream, no recent status update, investigating/fixed keywords).
 - `tag_service.py`: `get_or_create`, `attach`, `tags_for_event`, `events_for_tag`, `list_tags` with usage counts.
 - `summary_service.py`: Day-bounded events grouped by workstream; emits `summary_generated` audit events with decision/edited metadata. Skips voided events.
-- `inference_service.py`: Async subprocess wrapper for `BITNET_CMD`. Raises `InferenceUnavailable` when unset or unhealthy; never returns placeholder text.
+- `inference_service.py`: HTTP client for an OpenAI-compatible Chat Completions endpoint (`/v1/chat/completions`, `/v1/models`). `chat(messages, …)` is the only entry point; the model id is auto-detected via `GET /v1/models` on first call. Raises `InferenceUnavailable` on connect-refused / non-2xx / empty completions. Backend-agnostic: works with `llama-server`, ollama, vLLM, OpenAI, Anthropic-via-LiteLLM. Server lifecycle is decoupled — start it via `scripts/start-inference.sh` or systemd-user unit.
 - `daemon_service.py`: PID + heartbeat + last-job lifecycle. Status returns `running` | `degraded` | `stopped`. `stop()` polls SIGTERM exit and escalates to SIGKILL after 5 s. `start()` sets `cwd=project_root` so `python -m cli.main` resolves under any `WORKLOG_HOME`.
 - `scheduler_service.py`: APScheduler cron jobs at config-driven times. Each job calls `daemon.mark_job_run()` so `daemon.status()` flags `degraded` when jobs silently stop firing.
 - `notification_service.py`: Tries `notify-send`; falls back to `data/notifications.log` and stderr when unavailable (e.g., WSL2, headless).
@@ -82,7 +82,7 @@ Always generate a migration alongside model changes (especially enum widenings).
 ### Key data flows
 
 1. `wl add "<text>" [--workstream-id ID] [--tag t1 -t t2] [--quiet]`. With no `--workstream-id`: TTY users get a ranked suggestion prompt; non-TTY/`--quiet` falls back to the active workstream pointer.
-2. `wl reflect` → top unresolved capture events → `reflection_agent.generate_questions()` → interactive Q&A → inserts reflection rows. Healthcheck runs first; missing `BITNET_CMD` → exit 3.
+2. `wl reflect` → top unresolved capture events → `reflection_agent.generate_questions()` → interactive Q&A → inserts reflection rows. Healthcheck (`GET /v1/models`) runs first; unreachable inference server → exit 3.
 3. `wl summary [--day today|yesterday|-3d|YYYY-MM-DD] [--export-format markdown|json|terminal|all] [--yes]` → `summary_agent.run()` → human approval/edit → `export_service` writes markdown/JSON to `<WORKLOG_HOME>/exports/YYYY/MM/`.
 4. Daemon: `scheduler_service` fires at config times → `notification_service.send` → notify-send or fallback log. Each successful job updates `last_job` so health probes catch silent scheduler failure.
 5. `wl undo [EVENT_ID] [--reason ...]` writes a VOIDED event referencing the original. List/search/summary skip voided events by default.
@@ -92,7 +92,10 @@ Always generate a migration alongside model changes (especially enum widenings).
 | Variable | Purpose |
 |---|---|
 | `WORKLOG_HOME` | Root for runtime data (db, exports, daemon files, logs). Defaults to project root. |
-| `BITNET_CMD` | Path to local inference binary. Unset → `reflect`/`summary` exit 3 with hint. |
+| `WORKLOG_INFERENCE_URL` | OpenAI-compatible base URL ending in `/v1` (default `http://127.0.0.1:8080/v1`). |
+| `WORKLOG_INFERENCE_MODEL` | Model id; auto-detected from `/v1/models` if unset. |
+| `WORKLOG_INFERENCE_API_KEY` | Optional bearer token. |
+| `WORKLOG_INFERENCE_TIMEOUT` | Per-call timeout seconds (default 120). |
 | `WORKLOG_VENV` | Used by `scripts/pre-commit.sh` to locate the venv (default `~/BitNet/BitEnv`). |
 | `WORKLOG_PROMPTS` | Override prompt directory (defaults to `<repo>/prompts`). |
 | `WORKLOG_CONFIG` | Override config TOML path. |
