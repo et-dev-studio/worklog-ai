@@ -101,9 +101,11 @@ def test_add_non_tty_yes_returns_zero(tmp_path: Path) -> None:
     assert "Captured event:" in result.stdout
 
 
-def test_connect_no_data_flow_exits_clean() -> None:
-    result = runner.invoke(app, ["connect"])
-    assert result.exit_code == 0
+def test_connect_no_data_flow_exits_clean(tmp_path: Path) -> None:
+    home = tmp_path / "wl"
+    _init(home)
+    result = _shell(["connect"], home, stdin="")
+    assert result.returncode == 0
     assert "No events available." in result.stdout
 
 
