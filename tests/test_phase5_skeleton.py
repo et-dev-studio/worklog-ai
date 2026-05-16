@@ -17,3 +17,63 @@ def test_storage_package_exports_session_helpers() -> None:
     assert hasattr(postgres, "get_session")
     assert hasattr(postgres, "init_engine")
     assert hasattr(postgres, "shutdown_engine")
+
+
+def test_v2_models_register_expected_tables() -> None:
+    from db.models import Base
+
+    expected = {
+        "users",
+        "teams",
+        "team_members",
+        "workstreams",
+        "raw_events",
+        "agent_traces",
+    }
+    actual = set(Base.metadata.tables.keys())
+    missing = expected - actual
+    assert not missing, f"missing v2 tables in Base.metadata: {missing}"
+
+
+def test_workstream_title_is_immutable_after_set() -> None:
+    """v1 invariant ported (db/models.py:100)."""
+    import pytest
+
+    from db.models import Workstream
+
+    ws = Workstream(title="AUTH-1 oauth")
+    # First set during construction is permitted.
+    assert ws.title == "AUTH-1 oauth"
+    with pytest.raises(PermissionError):
+        ws.title = "renamed"
+
+
+def test_workstream_status_check_constraint_values() -> None:
+    from db.models import Workstream
+
+    constraints = {c.name for c in Workstream.__table__.constraints if c.name}
+    assert "ck_workstreams_status" in constraints
+    assert "ck_workstreams_visibility" in constraints
+
+
+def test_raw_event_kind_enum_covers_v1_and_v2_kinds() -> None:
+    from db.models import RawEventKind
+
+    v1_kinds = {
+        "capture",
+        "reflection",
+        "event_connected",
+        "status_update",
+        "summary_generated",
+        "voided",
+    }
+    v2_new = {
+        "git_commit",
+        "slack_message",
+        "meeting_segment",
+        "terminal_history",
+        "github_event",
+    }
+    values = {k.value for k in RawEventKind}
+    assert v1_kinds <= values
+    assert v2_new <= values
