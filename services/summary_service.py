@@ -1,78 +1,88 @@
+"""Daily summary service — v2 async + Postgres.
+
+Replaces the v1 ``Summary`` table with a RawEvent of
+``kind='summary_generated'`` whose content holds the summary body and
+whose metadata captures the day, decision, and edited flag. This keeps
+summaries lexically searchable (tsvector hits them automatically) and
+preserves the audit trail without a parallel table to keep in sync.
+
+Per-day events are grouped by workstream for the agent layer to
+summarise; voided events are filtered. The day-boundary fix from v1
+(exclusive ``< start_of_next_day``) is preserved.
+"""
+
 from __future__ import annotations
 
-import json
+import uuid
+from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
-from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import Event, EventType, Summary, Workstream
-from services.grouping_service import GroupingService
-
-
-def _voided_target_ids(session) -> set[str]:
-    import json as _json
-
-    rows = session.scalars(select(Event.metadata_json).where(Event.type == EventType.VOIDED))
-    out: set[str] = set()
-    for raw in rows:
-        if not raw:
-            continue
-        try:
-            parsed = _json.loads(raw)
-            if isinstance(parsed, dict) and parsed.get("event_id"):
-                out.add(parsed["event_id"])
-        except (TypeError, ValueError):
-            continue
-    return out
+from db.models import RawEvent, RawEventKind, Workstream
+from services.event_service import voided_target_ids
 
 
-class SummaryService:
-    def __init__(self, session: Session):
-        self.session = session
-        self.grouping = GroupingService()
-
-    def daily_events(self, day: date) -> list[Event]:
-        start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-        end = start + timedelta(days=1)
-        events = list(
-            self.session.scalars(
-                select(Event)
-                .where(Event.timestamp >= start)
-                .where(Event.timestamp < end)
-                .where(Event.type != EventType.VOIDED)
-            )
+async def daily_events(session: AsyncSession, day: date) -> list[RawEvent]:
+    start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    end = start + timedelta(days=1)
+    events = (
+        await session.execute(
+            select(RawEvent)
+            .where(RawEvent.ts >= start)
+            .where(RawEvent.ts < end)
+            .where(RawEvent.kind != RawEventKind.VOIDED.value)
+            .order_by(RawEvent.ts.asc())
         )
-        voided = _voided_target_ids(self.session)
-        return [e for e in events if e.id not in voided]
+    ).scalars().all()
+    voided = await voided_target_ids(session)
+    return [e for e in events if e.id not in voided]
 
-    def grouped_context(self, day: date) -> str:
-        events = self.daily_events(day)
-        groups = self.grouping.group_by_workstream(events)
-        blocks = []
-        for workstream_id, ws_events in groups.items():
+
+def _group_by_workstream(events: list[RawEvent]) -> dict[int | None, list[RawEvent]]:
+    groups: dict[int | None, list[RawEvent]] = defaultdict(list)
+    for event in events:
+        groups[event.workstream_id].append(event)
+    return dict(groups)
+
+
+async def grouped_context(session: AsyncSession, day: date) -> str:
+    events = await daily_events(session, day)
+    if not events:
+        return "No events"
+    blocks: list[str] = []
+    for workstream_id, ws_events in _group_by_workstream(events).items():
+        if workstream_id is None:
             title = "Unassigned"
-            if workstream_id != "unassigned":
-                ws = self.session.get(Workstream, workstream_id)
-                title = ws.title if ws else workstream_id
-            blocks.append(f"### {title}")
-            blocks.extend(f"- {e.content}" for e in ws_events)
-        return "\n".join(blocks) if blocks else "No events"
+        else:
+            ws = await session.get(Workstream, workstream_id)
+            title = ws.title if ws else f"<workstream {workstream_id}>"
+        blocks.append(f"### {title}")
+        blocks.extend(f"- {e.content}" for e in ws_events)
+    return "\n".join(blocks)
 
-    def save_summary(self, content: str, day: date, decision: str = "yes", edited: bool = False) -> Summary:
-        summary = Summary(id=str(uuid4()), date=day.isoformat(), content=content, created_at=datetime.now(UTC))
-        self.session.add(summary)
-        self.session.add(
-            Event(
-                id=str(uuid4()),
-                timestamp=datetime.now(UTC),
-                type=EventType.SUMMARY_GENERATED,
-                content=f"Summary generated for {day.isoformat()}",
-                workstream_id=None,
-                metadata_json=json.dumps({"date": day.isoformat(), "decision": decision, "edited": edited}),
-            )
-        )
-        self.session.commit()
-        self.session.refresh(summary)
-        return summary
+
+async def save_summary(
+    session: AsyncSession,
+    *,
+    content: str,
+    day: date,
+    actor_id: uuid.UUID,
+    decision: str = "yes",
+    edited: bool = False,
+) -> RawEvent:
+    summary_event = RawEvent(
+        kind=RawEventKind.SUMMARY_GENERATED.value,
+        content=content,
+        owner_id=actor_id,
+        event_metadata={
+            "date": day.isoformat(),
+            "decision": decision,
+            "edited": edited,
+        },
+    )
+    session.add(summary_event)
+    await session.flush()
+    await session.refresh(summary_event)
+    return summary_event
