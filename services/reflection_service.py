@@ -1,84 +1,74 @@
+"""Reflection scoring — v2 async + Postgres.
+
+Reflections in v2 are raw events of ``kind='reflection'`` rather than a
+separate table. This module just picks unresolved CAPTURE events worth
+asking follow-up questions about; the agent layer (phase 8) handles the
+actual Q&A and writes the reflection RawEvent rows.
+
+Priority signals carried over from v1 (services/reflection_service.py):
+- short text (<= 4 words):  +2
+- no workstream attached:   +2
+- no STATUS_UPDATE in 14d for this workstream: +2
+- contains "investigating": +2
+- contains "fixed":         -2
+"""
+
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import Event, EventType, Reflection
+from db.models import RawEvent, RawEventKind
 
 
-class ReflectionService:
-    WEIGHTS = {
-        "short_text": 2,
-        "no_workstream": 2,
-        "no_status_update": 2,
-        "investigating": 2,
-        "fixed": -2,
-    }
+def _priority(event: RawEvent, recent_status_update_workstreams: set[int]) -> int:
+    score = 0
+    if len(event.content.split()) <= 4:
+        score += 2
+    if event.workstream_id is None:
+        score += 2
+    elif event.workstream_id not in recent_status_update_workstreams:
+        score += 2
+    lower = event.content.lower()
+    if "investigating" in lower:
+        score += 2
+    if "fixed" in lower:
+        score -= 2
+    return score
 
-    def __init__(self, session: Session):
-        self.session = session
 
-    def _has_recent_status_update(self, event: Event) -> bool:
-        if not event.workstream_id:
-            return False
-        cutoff = event.timestamp - timedelta(days=14)
-        status_event = self.session.scalar(
-            select(Event.id)
-            .where(Event.workstream_id == event.workstream_id)
-            .where(Event.type == EventType.STATUS_UPDATE)
-            .where(Event.timestamp >= cutoff)
-            .limit(1)
+async def unresolved_captures(
+    session: AsyncSession, limit: int = 5
+) -> list[RawEvent]:
+    """Top-N CAPTURE events the user probably hasn't closed out yet."""
+    captures = (
+        await session.execute(
+            select(RawEvent)
+            .where(RawEvent.kind == RawEventKind.CAPTURE.value)
+            .order_by(RawEvent.ts.desc())
+            .limit(50)
         )
-        return bool(status_event)
+    ).scalars().all()
 
-    def reflection_priority(self, event: Event) -> int:
-        score = 0
-        if len(event.content.split()) <= 4:
-            score += self.WEIGHTS["short_text"]
-        if not event.workstream_id:
-            score += self.WEIGHTS["no_workstream"]
-        if not self._has_recent_status_update(event):
-            score += self.WEIGHTS["no_status_update"]
-        text = event.content.lower()
-        if "investigating" in text:
-            score += self.WEIGHTS["investigating"]
-        if "fixed" in text:
-            score += self.WEIGHTS["fixed"]
-        return score
-
-    def unresolved_capture_events(self, limit: int = 20) -> list[Event]:
-        stmt = (
-            select(Event)
-            .where(Event.type == EventType.CAPTURE)
-            .where(~Event.reflections.any())
-            .order_by(Event.timestamp.desc())
-        )
-        ranked = sorted(list(self.session.scalars(stmt)), key=self.reflection_priority, reverse=True)
-        return ranked[:limit]
-
-    def add_reflection(self, event_id: str, question: str, answer: str) -> Reflection:
-        reflection = Reflection(
-            id=str(uuid4()),
-            event_id=event_id,
-            question=question,
-            answer=answer,
-            created_at=datetime.now(UTC),
-        )
-        self.session.add(reflection)
-        self.session.add(
-            Event(
-                id=str(uuid4()),
-                timestamp=datetime.now(UTC),
-                type=EventType.REFLECTION,
-                content=f"Reflection added for event {event_id}",
-                workstream_id=None,
-                metadata_json=json.dumps({"event_id": event_id}),
+    cutoff = datetime.now(UTC) - timedelta(days=14)
+    recent_status_update_ws_ids = set(
+        (
+            await session.execute(
+                select(RawEvent.workstream_id)
+                .where(RawEvent.kind == RawEventKind.STATUS_UPDATE.value)
+                .where(RawEvent.ts >= cutoff)
+                .where(RawEvent.workstream_id.isnot(None))
             )
-        )
-        self.session.commit()
-        self.session.refresh(reflection)
-        return reflection
+        ).scalars()
+    )
+
+    ranked = sorted(
+        captures,
+        key=lambda e: _priority(e, recent_status_update_ws_ids),
+        reverse=True,
+    )
+    return [
+        e for e in ranked if _priority(e, recent_status_update_ws_ids) > 0
+    ][:limit]

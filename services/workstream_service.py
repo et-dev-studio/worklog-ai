@@ -1,59 +1,83 @@
+"""Workstream service — v2 async + Postgres.
+
+Stateless functions; the caller passes an ``AsyncSession`` from
+``services.storage.postgres.get_session``. Status changes emit a
+``status_update`` raw event so the audit trail survives.
+
+Titles are immutable after creation, enforced by the SQLAlchemy listener
+in ``db.models`` (ported verbatim from v1).
+"""
+
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import UTC, datetime
-from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import Event, EventType, Workstream, WorkstreamStatus
+from db.models import RawEvent, RawEventKind, Visibility, Workstream, WorkstreamStatus
 
 
-class WorkstreamService:
-    def __init__(self, session: Session):
-        self.session = session
+async def create(
+    session: AsyncSession,
+    *,
+    title: str,
+    owner_id: uuid.UUID,
+    summary: str | None = None,
+    team_id: uuid.UUID | None = None,
+    visibility: Visibility = Visibility.PRIVATE,
+) -> Workstream:
+    now = datetime.now(UTC)
+    ws = Workstream(
+        title=title,
+        summary=summary,
+        status=WorkstreamStatus.ACTIVE.value,
+        owner_id=owner_id,
+        team_id=team_id,
+        visibility=visibility.value,
+        created_at=now,
+        updated_at=now,
+        last_activity_at=now,
+    )
+    session.add(ws)
+    await session.flush()
+    await session.refresh(ws)
+    return ws
 
-    def create(self, title: str, summary: str | None = None) -> Workstream:
-        now = datetime.now(UTC)
-        ws = Workstream(
-            id=str(uuid4()),
-            title=title,
-            summary=summary,
-            status=WorkstreamStatus.ACTIVE,
-            created_at=now,
-            updated_at=now,
-            last_activity_at=now,
+
+async def list_all(session: AsyncSession) -> list[Workstream]:
+    result = await session.execute(
+        select(Workstream).order_by(Workstream.last_activity_at.desc().nullslast())
+    )
+    return list(result.scalars())
+
+
+async def get(session: AsyncSession, workstream_id: int) -> Workstream | None:
+    return await session.get(Workstream, workstream_id)
+
+
+async def set_status(
+    session: AsyncSession,
+    workstream_id: int,
+    status: WorkstreamStatus,
+    actor_id: uuid.UUID,
+) -> Workstream | None:
+    ws = await session.get(Workstream, workstream_id)
+    if not ws:
+        return None
+    ws.status = status.value
+    ws.updated_at = datetime.now(UTC)
+    session.add(
+        RawEvent(
+            kind=RawEventKind.STATUS_UPDATE.value,
+            content=f"Workstream {ws.title} status set to {status.value}",
+            workstream_id=workstream_id,
+            owner_id=actor_id,
+            event_metadata={"previous_status": ws.status, "new_status": status.value},
         )
-        self.session.add(ws)
-        self.session.commit()
-        self.session.refresh(ws)
-        return ws
-
-    def list_all(self) -> list[Workstream]:
-        return list(self.session.scalars(select(Workstream).order_by(Workstream.last_activity_at.desc())))
-
-    def set_status(self, workstream_id: str, status: WorkstreamStatus) -> Workstream | None:
-        workstream = self.session.get(Workstream, workstream_id)
-        if not workstream:
-            return None
-        workstream.status = status
-        workstream.updated_at = datetime.now(UTC)
-        self.session.add(
-            Event(
-                id=str(uuid4()),
-                timestamp=datetime.now(UTC),
-                type=EventType.STATUS_UPDATE,
-                content=f"Workstream {workstream.title} status set to {status.value}",
-                workstream_id=workstream_id,
-                metadata_json=None,
-            )
-        )
-        self.session.commit()
-        self.session.refresh(workstream)
-        return workstream
-
-    def rename(self, workstream_id: str, new_title: str) -> None:
-        raise PermissionError(
-            "Workstream titles are human-defined and immutable by system/AI operations. "
-            "Create a new workstream instead."
-        )
+    )
+    await session.flush()
+    await session.refresh(ws)
+    return ws

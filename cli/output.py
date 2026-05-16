@@ -8,8 +8,12 @@ import typer
 
 
 def _default(obj: Any) -> Any:
+    import uuid
+
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
     if hasattr(obj, "value"):
         return obj.value
     raise TypeError(f"not serializable: {type(obj).__name__}")

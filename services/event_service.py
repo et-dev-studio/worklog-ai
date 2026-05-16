@@ -1,203 +1,284 @@
+"""Event service — v2 async + Postgres.
+
+Captures raw events, ranks workstream suggestions, lists / searches
+events, and writes the VOIDED audit row for soft-deletes. The v1
+continuity-score ranking algorithm is preserved verbatim (it survives
+as one signal in the future v2 retrieval fusion stage — see
+v2 architecture.md §7.4).
+"""
+
 from __future__ import annotations
 
-import json
+import uuid
 from datetime import UTC, date, datetime, timedelta
-from uuid import uuid4
+from typing import Iterable
 
-from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import Event, EventTag, EventType, Tag, Workstream, WorkstreamStatus
+from db.models import RawEvent, RawEventKind, Workstream, WorkstreamStatus
 
 
 def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-class EventService:
-    def __init__(self, session: Session):
-        self.session = session
-        self.active_workstream_id: str | None = None
+# ---------------------------------------------------------------------------
+# Capture
+# ---------------------------------------------------------------------------
 
-    def set_active_workstream(self, workstream_id: str) -> None:
-        self.active_workstream_id = workstream_id
 
-    def add_capture(self, content: str, workstream_id: str | None = None) -> Event:
-        resolved_workstream_id = workstream_id or self.active_workstream_id
-        event = Event(
-            id=str(uuid4()),
-            timestamp=datetime.now(UTC),
-            type=EventType.CAPTURE,
-            content=content,
-            workstream_id=resolved_workstream_id,
-            metadata_json=None,
-        )
-        self.session.add(event)
-        self.session.commit()
-        self.session.refresh(event)
-        return event
+async def add_capture(
+    session: AsyncSession,
+    *,
+    content: str,
+    owner_id: uuid.UUID,
+    workstream_id: int | None = None,
+) -> RawEvent:
+    event = RawEvent(
+        kind=RawEventKind.CAPTURE.value,
+        content=content,
+        owner_id=owner_id,
+        workstream_id=workstream_id,
+    )
+    session.add(event)
+    if workstream_id is not None:
+        ws = await session.get(Workstream, workstream_id)
+        if ws is not None:
+            ws.last_activity_at = datetime.now(UTC)
+    await session.flush()
+    await session.refresh(event)
+    return event
 
-    def _score_workstream(self, ws: Workstream, words: set[str], technical_terms: set[str], now: datetime) -> float:
-        title_words = {w.lower() for w in ws.title.split()}
 
-        keyword_overlap = len(words.intersection(title_words)) * 3.0
-        exact_technical_terms = len(technical_terms.intersection(title_words)) * 4.0
+# ---------------------------------------------------------------------------
+# Suggestion ranker (v1 continuity score preserved)
+# ---------------------------------------------------------------------------
 
+
+async def _score_workstream(
+    session: AsyncSession,
+    ws: Workstream,
+    words: set[str],
+    technical_terms: set[str],
+    now: datetime,
+) -> float:
+    title_words = {w.lower() for w in ws.title.split()}
+
+    keyword_overlap = len(words & title_words) * 3.0
+    exact_technical_terms = len(technical_terms & title_words) * 4.0
+
+    if ws.last_activity_at is None:
+        recent_activity = 0.0
+    else:
         recency_days = max((now - _as_utc(ws.last_activity_at)).days, 0)
         recent_activity = max(0.0, 14 - recency_days)
 
-        prior_attach_count = self.session.scalar(select(func.count()).select_from(Event).where(Event.workstream_id == ws.id)) or 0
-        prior_attachments = min(prior_attach_count, 20) * 0.4
+    prior_count = await session.scalar(
+        select(func.count()).select_from(RawEvent).where(RawEvent.workstream_id == ws.id)
+    ) or 0
+    prior_attachments = min(prior_count, 20) * 0.4
 
-        recent_ws_events = list(
-            self.session.scalars(
-                select(Event)
-                .where(Event.workstream_id == ws.id)
-                .where(Event.type == EventType.CAPTURE)
-                .order_by(Event.timestamp.desc())
-                .limit(20)
-            )
+    recent = (
+        await session.execute(
+            select(RawEvent)
+            .where(RawEvent.workstream_id == ws.id)
+            .where(RawEvent.kind == RawEventKind.CAPTURE.value)
+            .order_by(RawEvent.ts.desc())
+            .limit(20)
         )
+    ).scalars().all()
 
-        semantic_similarity = 0.0
-        temporal_proximity = 0.0
-        for e in recent_ws_events:
-            e_words = {w.lower() for w in e.content.split() if len(w) > 2}
-            semantic_similarity += len(words.intersection(e_words)) * 0.7
-            hours = max((now - _as_utc(e.timestamp)).total_seconds() / 3600, 0)
-            temporal_proximity += max(0.0, 72 - hours) / 72
+    semantic_similarity = 0.0
+    temporal_proximity = 0.0
+    for e in recent:
+        e_words = {w.lower() for w in e.content.split() if len(w) > 2}
+        semantic_similarity += len(words & e_words) * 0.7
+        hours = max((now - _as_utc(e.ts)).total_seconds() / 3600, 0)
+        temporal_proximity += max(0.0, 72 - hours) / 72
 
-        return keyword_overlap + exact_technical_terms + recent_activity + prior_attachments + semantic_similarity + temporal_proximity
+    return (
+        keyword_overlap
+        + exact_technical_terms
+        + recent_activity
+        + prior_attachments
+        + semantic_similarity
+        + temporal_proximity
+    )
 
-    def suggest_workstreams(self, content: str, limit: int = 3) -> list[Workstream]:
-        candidates = list(
-            self.session.scalars(
-                select(Workstream).where(
-                    Workstream.status.in_([WorkstreamStatus.ACTIVE, WorkstreamStatus.PAUSED])
+
+async def suggest_workstreams(
+    session: AsyncSession, content: str, limit: int = 3
+) -> list[Workstream]:
+    candidates = (
+        await session.execute(
+            select(Workstream).where(
+                Workstream.status.in_(
+                    [WorkstreamStatus.ACTIVE.value, WorkstreamStatus.PAUSED.value]
                 )
             )
         )
-        words = {w.lower() for w in content.split() if len(w) > 2}
-        technical_terms = {w for w in words if any(ch.isdigit() for ch in w) or "-" in w}
-        now = datetime.now(UTC)
+    ).scalars().all()
 
-        ranked = sorted(candidates, key=lambda ws: self._score_workstream(ws, words, technical_terms, now), reverse=True)
-        return ranked[:limit]
+    words = {w.lower() for w in content.split() if len(w) > 2}
+    technical_terms = {w for w in words if any(ch.isdigit() for ch in w) or "-" in w}
+    now = datetime.now(UTC)
 
-    def list_recent(self, limit: int = 20) -> list[Event]:
-        events = list(
-            self.session.scalars(
-                select(Event).order_by(Event.timestamp.desc()).limit(limit * 2)
+    scored = [
+        (await _score_workstream(session, ws, words, technical_terms, now), ws)
+        for ws in candidates
+    ]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [ws for _, ws in scored[:limit]]
+
+
+# ---------------------------------------------------------------------------
+# Listing / lookup / search
+# ---------------------------------------------------------------------------
+
+
+async def voided_target_ids(session: AsyncSession) -> set[int]:
+    rows = (
+        await session.execute(
+            select(RawEvent.event_metadata).where(
+                RawEvent.kind == RawEventKind.VOIDED.value
             )
         )
-        voided = self.voided_target_ids()
-        return [e for e in events if e.id not in voided][:limit]
+    ).scalars().all()
+    out: set[int] = set()
+    for meta in rows:
+        if isinstance(meta, dict):
+            eid = meta.get("event_id")
+            if isinstance(eid, int):
+                out.add(eid)
+    return out
 
-    def voided_target_ids(self) -> set[str]:
-        rows = self.session.scalars(
-            select(Event.metadata_json).where(Event.type == EventType.VOIDED)
+
+async def list_recent(session: AsyncSession, limit: int = 20) -> list[RawEvent]:
+    events = (
+        await session.execute(
+            select(RawEvent).order_by(RawEvent.ts.desc()).limit(limit * 2)
         )
-        targets: set[str] = set()
-        for raw in rows:
-            if not raw:
-                continue
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict) and parsed.get("event_id"):
-                    targets.add(parsed["event_id"])
-            except (TypeError, ValueError):
-                continue
-        return targets
+    ).scalars().all()
+    voided = await voided_target_ids(session)
+    return [e for e in events if e.id not in voided][:limit]
 
-    def list_events(
-        self,
-        day_range: tuple[date, date] | None = None,
-        workstream_id: str | None = None,
-        tag: str | None = None,
-        types: list[EventType] | None = None,
-        include_voided: bool = False,
-        limit: int = 50,
-    ) -> list[Event]:
-        stmt = select(Event)
-        if day_range is not None:
-            start = datetime(day_range[0].year, day_range[0].month, day_range[0].day, tzinfo=UTC)
-            end = datetime(day_range[1].year, day_range[1].month, day_range[1].day, tzinfo=UTC) + timedelta(days=1)
-            stmt = stmt.where(Event.timestamp >= start).where(Event.timestamp < end)
-        if workstream_id:
-            stmt = stmt.where(Event.workstream_id == workstream_id)
-        if types:
-            stmt = stmt.where(Event.type.in_(types))
-        else:
-            stmt = stmt.where(Event.type == EventType.CAPTURE)
-        if tag:
-            stmt = stmt.join(EventTag, EventTag.event_id == Event.id).join(
-                Tag, Tag.id == EventTag.tag_id
-            ).where(Tag.name == tag)
-        events = list(self.session.scalars(stmt.order_by(Event.timestamp.desc()).limit(limit)))
-        if include_voided:
-            return events
-        voided = self.voided_target_ids()
-        return [e for e in events if e.id not in voided]
 
-    def get_event(self, event_id: str) -> Event | None:
-        return self.session.get(Event, event_id)
-
-    def search(self, query: str, limit: int = 25, include_voided: bool = False) -> list[Event]:
-        rows = self.session.execute(
-            text(
-                "SELECT event_id FROM events_fts WHERE events_fts MATCH :q "
-                "ORDER BY rank LIMIT :lim"
-            ),
-            {"q": query, "lim": limit},
-        ).fetchall()
-        ids = [r[0] for r in rows]
-        if not ids:
-            return []
-        events = list(self.session.scalars(select(Event).where(Event.id.in_(ids))))
-        ordered = {e.id: e for e in events}
-        result = [ordered[i] for i in ids if i in ordered]
-        if include_voided:
-            return result
-        voided = self.voided_target_ids()
-        return [e for e in result if e.id not in voided]
-
-    def void_event(self, event_id: str, reason: str | None = None) -> Event | None:
-        event = self.session.get(Event, event_id)
-        if not event:
-            return None
-        if event.type != EventType.CAPTURE:
-            raise ValueError("Only CAPTURE events can be voided.")
-        existing = self.voided_target_ids()
-        if event_id in existing:
-            return event
-        self.session.add(
-            Event(
-                id=str(uuid4()),
-                timestamp=datetime.now(UTC),
-                type=EventType.VOIDED,
-                content=f"Voided event {event_id}" + (f": {reason}" if reason else ""),
-                workstream_id=event.workstream_id,
-                metadata_json=json.dumps({"event_id": event_id, "reason": reason}),
+async def list_events(
+    session: AsyncSession,
+    *,
+    day_range: tuple[date, date] | None = None,
+    workstream_id: int | None = None,
+    kinds: Iterable[RawEventKind] | None = None,
+    include_voided: bool = False,
+    limit: int = 50,
+) -> list[RawEvent]:
+    stmt = select(RawEvent)
+    if day_range is not None:
+        start = datetime(
+            day_range[0].year, day_range[0].month, day_range[0].day, tzinfo=UTC
+        )
+        end = (
+            datetime(
+                day_range[1].year, day_range[1].month, day_range[1].day, tzinfo=UTC
             )
+            + timedelta(days=1)
         )
-        self.session.commit()
+        stmt = stmt.where(RawEvent.ts >= start).where(RawEvent.ts < end)
+    if workstream_id is not None:
+        stmt = stmt.where(RawEvent.workstream_id == workstream_id)
+    if kinds:
+        stmt = stmt.where(RawEvent.kind.in_([k.value for k in kinds]))
+    else:
+        stmt = stmt.where(RawEvent.kind == RawEventKind.CAPTURE.value)
+    events = (
+        await session.execute(stmt.order_by(RawEvent.ts.desc()).limit(limit))
+    ).scalars().all()
+    if include_voided:
+        return list(events)
+    voided = await voided_target_ids(session)
+    return [e for e in events if e.id not in voided]
+
+
+async def get_event(session: AsyncSession, event_id: int) -> RawEvent | None:
+    return await session.get(RawEvent, event_id)
+
+
+async def search(
+    session: AsyncSession, query: str, limit: int = 25, include_voided: bool = False
+) -> list[RawEvent]:
+    """Lexical search via the GIN-indexed tsvector column."""
+    stmt = (
+        select(RawEvent)
+        .where(RawEvent.content_tsv.op("@@")(func.plainto_tsquery("english", query)))
+        .order_by(
+            func.ts_rank_cd(
+                RawEvent.content_tsv, func.plainto_tsquery("english", query)
+            ).desc(),
+            RawEvent.ts.desc(),
+        )
+        .limit(limit)
+    )
+    events = (await session.execute(stmt)).scalars().all()
+    if include_voided:
+        return list(events)
+    voided = await voided_target_ids(session)
+    return [e for e in events if e.id not in voided]
+
+
+# ---------------------------------------------------------------------------
+# Audit mutations
+# ---------------------------------------------------------------------------
+
+
+async def void_event(
+    session: AsyncSession,
+    event_id: int,
+    *,
+    actor_id: uuid.UUID,
+    reason: str | None = None,
+) -> RawEvent | None:
+    event = await session.get(RawEvent, event_id)
+    if not event:
+        return None
+    if event.kind != RawEventKind.CAPTURE.value:
+        raise ValueError("Only CAPTURE events can be voided.")
+    existing = await voided_target_ids(session)
+    if event_id in existing:
         return event
-
-    def connect_event(self, event_id: str, workstream_id: str) -> Event | None:
-        event = self.session.get(Event, event_id)
-        if not event:
-            return None
-        event.workstream_id = workstream_id
-        self.session.add(
-            Event(
-                id=str(uuid4()),
-                timestamp=datetime.now(UTC),
-                type=EventType.EVENT_CONNECTED,
-                content=f"Connected event {event_id} to workstream {workstream_id}",
-                workstream_id=workstream_id,
-                metadata_json=json.dumps({"event_id": event_id, "workstream_id": workstream_id}),
-            )
+    session.add(
+        RawEvent(
+            kind=RawEventKind.VOIDED.value,
+            content=f"Voided event {event_id}" + (f": {reason}" if reason else ""),
+            workstream_id=event.workstream_id,
+            owner_id=actor_id,
+            event_metadata={"event_id": event_id, "reason": reason},
         )
-        self.session.commit()
-        self.session.refresh(event)
-        return event
+    )
+    await session.flush()
+    return event
+
+
+async def connect_event(
+    session: AsyncSession,
+    event_id: int,
+    workstream_id: int,
+    *,
+    actor_id: uuid.UUID,
+) -> RawEvent | None:
+    event = await session.get(RawEvent, event_id)
+    if not event:
+        return None
+    event.workstream_id = workstream_id
+    session.add(
+        RawEvent(
+            kind=RawEventKind.EVENT_CONNECTED.value,
+            content=f"Connected event {event_id} to workstream {workstream_id}",
+            workstream_id=workstream_id,
+            owner_id=actor_id,
+            event_metadata={"event_id": event_id, "workstream_id": workstream_id},
+        )
+    )
+    await session.flush()
+    await session.refresh(event)
+    return event
