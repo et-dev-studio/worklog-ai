@@ -2,6 +2,29 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## V2 architecture in progress (read first)
+
+The repo is mid-transition. **v1 ships on the `v1` branch / `v1-final` tag; `main` is the active v2 development line.** The code currently on `main` is still v1 until Phase 5 lands.
+
+- **v2 design doc:** `v2 architecture.md` is the authoritative blueprint. Read it before proposing changes that touch storage, retrieval, agents, or schema.
+- **Branching:** `main` always carries the latest version. Feature branches per phase: `phase-5/postgres-foundation`, `phase-6/memory-model`, `phase-7/retrieval`, `phase-8/mas-integrations`. Each merges to `main` via PR.
+- **Storage shift:** v2 drops SQLite entirely. Single backend = **Supabase Cloud Postgres + pgvector**. No storage adapter abstraction.
+- **Auth:** Postgres role per user; RLS policies key off `current_user_id()` helper. Connection via `WORKLOG_DB_URL`.
+- **Embedding default:** `BAAI/bge-base-en-v1.5` (dim **768**), via `sentence-transformers`.
+- **Memory model:** memory objects independently editable; `source_kind` immutable after insert; `last_edited_by` is NULL for never-human-edited rows, set to user-id on first human edit, never set by agents. All versions kept forever in `memory_object_versions`.
+- **`wl recall` vs `wl event search`:** kept separate. Recall = hybrid (RRF over lexical+semantic+temporal+relational) over `memory_objects`. Event search = lexical over `raw_events`.
+- **No v1 backfill.** v1 captures stay on v1; v2 users start fresh.
+- **New CLI groups (v2):** `wl memory`, `wl recall`, `wl meeting`, `wl team`, `wl agent trace`.
+- **New env vars (v2):** `WORKLOG_DB_URL`, `WORKLOG_DB_SERVICE_ROLE_KEY`, `WORKLOG_EMBEDDING_MODEL` (defaults `BAAI/bge-base-en-v1.5`).
+- **v1 env vars retained:** `WORKLOG_INFERENCE_URL`/`_MODEL`/`_API_KEY`/`_TIMEOUT`, `WORKLOG_HOME`, `WORKLOG_PROMPTS`, `WORKLOG_CONFIG`. `WORKLOG_INFERENCE_*` now seeds the `local` route in `config/inference_routes.toml`.
+- **Carried v1 invariants:** `chat(messages, temperature, max_tokens, **extra) -> str` signature + `InferenceUnavailable` exit-3 contract; workstream title immutability listener pattern (`db/models.py:100`); append-only audit discipline; `wl doctor` health-probe pattern.
+
+When in doubt about which architecture an in-flight task targets, check the current branch name and ask before editing storage or schema code.
+
+The rest of this file documents **v1** (current code on `main`). When Phase 5 merges, replace the v1 sections accordingly.
+
+---
+
 ## Environment
 
 Always activate the project venv before running any Python command:
