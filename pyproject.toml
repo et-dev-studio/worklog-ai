@@ -40,3 +40,4 @@ include = ["agents*", "cli*", "db*", "services*", "integrations*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
