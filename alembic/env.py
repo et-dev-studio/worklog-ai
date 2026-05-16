@@ -20,6 +20,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+try:
+    from dotenv import find_dotenv, load_dotenv
+
+    load_dotenv(find_dotenv(usecwd=True))
+except ImportError:
+    pass
+
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 

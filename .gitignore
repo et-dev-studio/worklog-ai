@@ -16,3 +16,8 @@ worklog-daemon.heartbeat
 worklog-daemon.last_job
 notifications.log
 .active_workstream
+
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
