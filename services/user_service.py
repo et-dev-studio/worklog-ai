@@ -68,13 +68,17 @@ async def create_user(
     generated_password: str | None = None
     if create_pg_role:
         generated_password = password or secrets.token_urlsafe(24)
-        # Role name is shape-validated above; safe to inline.
+        # Postgres rejects bind parameters in CREATE ROLE PASSWORD — the
+        # literal has to be inlined into the statement. token_urlsafe()
+        # outputs URL-safe base64 ([A-Za-z0-9_-]) so it contains no
+        # single quotes; the explicit escape below makes the function
+        # safe against externally-supplied passwords too.
+        pw_literal = "'" + generated_password.replace("'", "''") + "'"
         await session.execute(
             text(
-                f"CREATE ROLE {role} LOGIN PASSWORD :pwd "
+                f"CREATE ROLE {role} LOGIN PASSWORD {pw_literal} "
                 f"NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT"
-            ),
-            {"pwd": generated_password},
+            )
         )
 
     user = User(pg_role=role, display_name=display_name, email=email)
