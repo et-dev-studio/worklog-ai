@@ -11,6 +11,29 @@ on the `v1` branch / `v1-final` tag.
 from __future__ import annotations
 
 
+def test_paths_service_drops_sqlite_helpers() -> None:
+    """v2 paths_service must not expose db_path / db_url any more."""
+    from services import paths_service
+
+    assert not hasattr(paths_service, "db_path"), (
+        "db_path() is v1 SQLite-only; remove the import"
+    )
+    assert not hasattr(paths_service, "db_url"), (
+        "db_url() is v1 SQLite-only; use services.storage.postgres instead"
+    )
+
+
+def test_paths_service_exposes_embeddings_cache_dir(tmp_path, monkeypatch) -> None:
+    """Phase 6 readiness — sentence-transformers needs a cache root."""
+    monkeypatch.setenv("WORKLOG_HOME", str(tmp_path))
+    from services import paths_service
+
+    cache = paths_service.embeddings_cache_dir()
+    assert cache.exists()
+    assert cache.is_dir()
+    assert cache.parent == tmp_path
+
+
 def test_services_package_loads_dotenv_on_import() -> None:
     """services/__init__.py is the canonical .env load site."""
     import importlib
