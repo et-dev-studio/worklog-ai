@@ -11,6 +11,20 @@ on the `v1` branch / `v1-final` tag.
 from __future__ import annotations
 
 
+def test_services_package_loads_dotenv_on_import() -> None:
+    """services/__init__.py is the canonical .env load site."""
+    import importlib
+    import sys
+
+    # Reimport so the module-level load_dotenv call re-runs cleanly.
+    for name in [m for m in sys.modules if m == "services" or m.startswith("services.")]:
+        del sys.modules[name]
+    services = importlib.import_module("services")
+    # The module body imports load_dotenv at module scope, which means
+    # python-dotenv must be installed (no try/except guard).
+    assert hasattr(services, "load_dotenv")
+
+
 def test_storage_package_exports_session_helpers() -> None:
     from services.storage import postgres
 

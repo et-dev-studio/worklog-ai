@@ -39,16 +39,9 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.sql import text
 
-# Best-effort .env load. Existing environment variables always win, so a
-# shell export overrides .env contents (python-dotenv default). Missing
-# dotenv (e.g. on a fresh checkout before `pip install -e .[dev]`) falls
-# back to shell-only env, which is fine.
-try:
-    from dotenv import find_dotenv, load_dotenv
-
-    load_dotenv(find_dotenv(usecwd=True))
-except ImportError:
-    pass
+# .env is loaded by services/__init__.py at package import time. Don't
+# duplicate the load here — it would re-walk the filesystem on every
+# session open.
 
 
 class StorageNotInitialized(RuntimeError):
